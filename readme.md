@@ -37,7 +37,7 @@ Xây dựng một hệ thống gồm:
 
 * **Web admin** để quản trị các SSH tunnel endpoint.
 * **Tunnel daemon** để bind local port cho từng endpoint.
-* Với mỗi client session, daemon sẽ tạo một **SSH-backed bridge** đi qua SSH server rồi tới destination.
+* Mỗi endpoint giữ **một SSH local-forward tunnel** đi qua SSH server rồi tới destination.
 * **Realtime monitoring** để theo dõi:
   * endpoint nào đang running,
   * bao nhiêu client đang connect vào từng endpoint,
@@ -78,7 +78,7 @@ Mục tiêu UX:
   * enable / disable.
 * Nhiều client có thể cùng connect vào một endpoint.
 * Mỗi client tạo **session riêng**.
-* Mỗi session được bridge bằng **một SSH process riêng** dùng `ssh -W`.
+* Nhiều client có thể cùng dùng chung **một SSH tunnel process** của endpoint.
 * UI hiển thị:
   * danh sách endpoint,
   * SSH server của endpoint,
@@ -147,12 +147,9 @@ Local client connect vào:
 Runtime sẽ:
 
 1. accept client connection,
-2. spawn SSH process:
-
-   * `ssh -W 10.255.205.8:1080 thanh2n@10.46.4.66 -p 22`
-
-3. bridge dữ liệu giữa local client socket và SSH process stdin/stdout,
-4. cập nhật session counters,
+2. local connection đó được OpenSSH local-forward process nhận,
+3. OpenSSH mở channel qua SSH server tới `10.255.205.8:1080`,
+4. app poll session/counter từ socket table của hệ điều hành,
 5. đẩy event realtime lên dashboard.
 
 ### Use case 3: Admin theo dõi realtime
@@ -183,8 +180,8 @@ Dashboard hiển thị:
 ### 5.2 Data plane
 
 * Local listener manager
-* Session manager
-* Per-session SSH bridge
+* Session tracker
+* Endpoint-level SSH local-forward process manager
 * Metrics collector
 
 ### 5.3 Topology logic
@@ -202,8 +199,8 @@ Dashboard hiển thị:
 [Tunnel Daemon]
    |- local listener endpoint A
    |- local listener endpoint B
-   |- session manager
-   |- ssh bridge launcher
+   |- session tracker
+   |- ssh tunnel process manager
    |- metrics collector
 
 Client flow:
@@ -229,24 +226,29 @@ Mỗi endpoint có:
 Mỗi client session có:
 
 * 1 client socket
-* 1 SSH subprocess `ssh -W`
+* 1 local forwarded TCP connection được OpenSSH phục vụ bên trong SSH tunnel
 * byte counter up/down riêng
 * start time
 * close reason
 
-### 6.3 Vì sao dùng `ssh -W`
+### 6.3 Vì sao dùng `ssh -L`
 
-Đây là cách đơn giản nhất để giữ đúng topology SSH tunnel mà vẫn monitor được:
+Để behavior gần MobaXterm hơn, mỗi endpoint chạy một tunnel kiểu:
 
-* session nào cũng có object riêng,
-* byte counter đo ngay trong app,
-* disconnect session từ UI dễ,
-* không cần thư viện SSH ngoài stdlib.
+* `ssh -N -L listen_host:listen_port:destination_host:destination_port user@ssh_host`
+
+Lợi ích:
+
+* đúng kiểu local SSH forwarding,
+* một endpoint phục vụ được nhiều client đồng thời,
+* hành vi gần với MobaXterm hơn nhiều,
+* không phải bắt tay SSH lại cho mỗi client connection.
 
 Trade-off:
 
-* mỗi client session tạo 1 SSH process,
-* chưa tối ưu bằng SSH multiplexing production-grade.
+* OpenSSH giữ ownership của local forwarded socket,
+* app phải poll session/counter bằng `ss` thay vì đọc byte trực tiếp trong data path,
+* số liệu traffic là best-effort theo OS socket stats.
 
 ---
 
@@ -418,7 +420,7 @@ Repo hiện tại implement theo hướng:
 
 * không còn direct TCP connect từ app tới destination nữa,
 * destination chỉ được reach từ phía SSH server,
-* mỗi session dùng `ssh -W destination_host:destination_port user@ssh_host`.
+* mỗi endpoint dùng persistent `ssh -N -L ...`.
 
 ---
 
@@ -430,7 +432,7 @@ Hiện tại:
 
 * hỗ trợ **key-based auth / ssh-agent / default key**,
 * chưa có password prompt tương tác kiểu desktop app,
-* mỗi session là một SSH process riêng,
+* mỗi endpoint là một SSH process riêng,
 * preflight SSH được chạy khi start endpoint,
 * nếu endpoint direct-forward cũ còn trong DB thì sẽ bị xem là legacy và không start được.
 
