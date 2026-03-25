@@ -78,7 +78,7 @@ Mục tiêu UX:
   * enable / disable.
 * Nhiều client có thể cùng connect vào một endpoint.
 * Mỗi client tạo **session riêng**.
-* Nhiều client có thể cùng dùng chung **một SSH tunnel process** của endpoint.
+* Mỗi client được tách biệt bằng **một SSH session riêng** tới SSH server.
 * UI hiển thị:
   * danh sách endpoint,
   * SSH server của endpoint,
@@ -226,29 +226,31 @@ Mỗi endpoint có:
 Mỗi client session có:
 
 * 1 client socket
-* 1 local forwarded TCP connection được OpenSSH phục vụ bên trong SSH tunnel
+* 1 SSH subprocess `ssh -W` riêng
 * byte counter up/down riêng
 * start time
 * close reason
 
-### 6.3 Vì sao dùng `ssh -L`
+### 6.3 Vì sao dùng `ssh -W`
 
-Để behavior gần MobaXterm hơn, mỗi endpoint chạy một tunnel kiểu:
+Để đảm bảo isolation rõ ràng giữa nhiều client cùng vào một endpoint, runtime dùng:
 
-* `ssh -N -L listen_host:listen_port:destination_host:destination_port user@ssh_host`
+* app tự accept local client connection
+* với mỗi client, spawn:
+  * `ssh -W destination_host:destination_port user@ssh_host`
 
 Lợi ích:
 
-* đúng kiểu local SSH forwarding,
-* một endpoint phục vụ được nhiều client đồng thời,
-* hành vi gần với MobaXterm hơn nhiều,
-* không phải bắt tay SSH lại cho mỗi client connection.
+* đúng topology đi qua SSH server,
+* **1 client = 1 SSH transport riêng**,
+* tránh shared transport giữa nhiều client,
+* dễ disconnect từng session từ UI,
+* metrics/session tracking chính xác hơn.
 
 Trade-off:
 
-* OpenSSH giữ ownership của local forwarded socket,
-* app phải poll session/counter bằng `ss` thay vì đọc byte trực tiếp trong data path,
-* số liệu traffic là best-effort theo OS socket stats.
+* mỗi client tạo 1 SSH process riêng,
+* chi phí handshake SSH cao hơn kiểu shared tunnel.
 
 ---
 
@@ -420,7 +422,7 @@ Repo hiện tại implement theo hướng:
 
 * không còn direct TCP connect từ app tới destination nữa,
 * destination chỉ được reach từ phía SSH server,
-* mỗi endpoint dùng persistent `ssh -N -L ...`.
+* mỗi client session dùng `ssh -W destination_host:destination_port ...`.
 
 ---
 
@@ -432,7 +434,7 @@ Hiện tại:
 
 * hỗ trợ **key-based auth / ssh-agent / default key**,
 * chưa có password prompt tương tác kiểu desktop app,
-* mỗi endpoint là một SSH process riêng,
+* mỗi client session là một SSH process riêng,
 * preflight SSH được chạy khi start endpoint,
 * nếu endpoint direct-forward cũ còn trong DB thì sẽ bị xem là legacy và không start được.
 
