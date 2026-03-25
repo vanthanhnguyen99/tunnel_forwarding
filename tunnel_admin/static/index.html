@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SSH Tunnel Admin</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="background-orb orb-a"></div>
+    <div class="background-orb orb-b"></div>
+
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <span class="brand-kicker">MVP Control Plane</span>
+          <h1>SSH Tunnel Admin</h1>
+          <p>Manage MobaXterm-style local SSH tunnels, sessions and runtime traffic from one dashboard.</p>
+        </div>
+        <div class="topbar-actions">
+          <span id="user-chip" class="chip hidden"></span>
+          <button id="refresh-all-button" class="ghost-button hidden" type="button">Refresh</button>
+          <button id="logout-button" class="ghost-button hidden" type="button">Logout</button>
+        </div>
+      </header>
+
+      <div id="notice" class="notice hidden"></div>
+
+      <section id="login-view" class="login-view">
+        <div class="login-card">
+          <div class="login-copy">
+            <span class="section-kicker">Admin Login</span>
+            <h2>Operate local SSH forwarding endpoints without restarting the service</h2>
+            <p>
+              This MVP binds a local port, accepts client connections, and relays each session through an SSH
+              server to the configured remote destination.
+            </p>
+            <ul class="login-list">
+              <li>Local listeners per endpoint with SSH as the transport layer</li>
+              <li>Per-session SSH bridge with byte counters</li>
+              <li>SSE realtime updates for metrics and session events</li>
+            </ul>
+            <p class="login-hint">Default admin credentials come from <code>ADMIN_DEFAULT_USER</code> and <code>ADMIN_DEFAULT_PASS</code>.</p>
+          </div>
+
+          <form id="login-form" class="card form-grid">
+            <label>
+              <span>Username</span>
+              <input id="login-username" name="username" type="text" autocomplete="username" required />
+            </label>
+            <label>
+              <span>Password</span>
+              <input id="login-password" name="password" type="password" autocomplete="current-password" required />
+            </label>
+            <button class="primary-button" type="submit">Sign In</button>
+          </form>
+        </div>
+      </section>
+
+      <main id="dashboard-view" class="dashboard hidden">
+        <section class="hero card">
+          <div>
+            <span class="section-kicker">Runtime Overview</span>
+            <h2>Live SSH forwarding health and active traffic</h2>
+          </div>
+          <div class="hero-meta">
+            <span class="meta-pill">Realtime via SSE</span>
+            <span class="meta-pill">SQLite persistence</span>
+            <span class="meta-pill">OpenSSH-backed transport</span>
+          </div>
+        </section>
+
+        <section class="stats-grid">
+          <article class="stat-card card">
+            <span>Total Endpoints</span>
+            <strong id="stat-total-endpoints">0</strong>
+          </article>
+          <article class="stat-card card">
+            <span>Active Endpoints</span>
+            <strong id="stat-active-endpoints">0</strong>
+          </article>
+          <article class="stat-card card">
+            <span>Active Sessions</span>
+            <strong id="stat-active-sessions">0</strong>
+          </article>
+          <article class="stat-card card">
+            <span>Total Traffic</span>
+            <strong id="stat-total-traffic">0 B</strong>
+          </article>
+        </section>
+
+        <section class="analytics-grid">
+          <article class="card chart-card">
+            <div class="panel-heading">
+              <div>
+                <span class="section-kicker">Chart 1</span>
+                <h3>Active Connections</h3>
+              </div>
+              <span id="connections-chart-latest" class="panel-value">0</span>
+            </div>
+            <svg id="connections-chart" class="chart-svg" viewBox="0 0 600 220" preserveAspectRatio="none"></svg>
+          </article>
+
+          <article class="card chart-card">
+            <div class="panel-heading">
+              <div>
+                <span class="section-kicker">Chart 2</span>
+                <h3>Traffic In / Out</h3>
+              </div>
+              <span id="traffic-chart-latest" class="panel-value">0 B/s</span>
+            </div>
+            <svg id="traffic-chart" class="chart-svg" viewBox="0 0 600 220" preserveAspectRatio="none"></svg>
+          </article>
+
+          <article class="card top-endpoints-card">
+            <div class="panel-heading">
+              <div>
+                <span class="section-kicker">Chart 3</span>
+                <h3>Top Endpoints</h3>
+              </div>
+            </div>
+            <div id="top-endpoints" class="top-endpoints-list"></div>
+          </article>
+        </section>
+
+        <section class="card table-card">
+          <div class="panel-heading">
+            <div>
+              <span class="section-kicker">MobaXterm Inspired Table</span>
+              <h3>Endpoints</h3>
+            </div>
+            <div class="toolbar">
+              <input id="search-input" type="search" placeholder="Search by name" />
+              <select id="status-filter">
+                <option value="all">All status</option>
+                <option value="running">Running</option>
+                <option value="stopped">Stopped</option>
+                <option value="disabled">Disabled</option>
+              </select>
+              <button id="new-endpoint-button" class="primary-button" type="button">New Tunnel</button>
+              <button id="refresh-table-button" class="ghost-button" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Listen</th>
+                  <th>SSH Server</th>
+                  <th>Forward To</th>
+                  <th>Status</th>
+                  <th>Clients</th>
+                  <th>Traffic</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="endpoints-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="split-grid">
+          <article class="card table-card">
+            <div class="panel-heading">
+              <div>
+                <span class="section-kicker">Runtime Sessions</span>
+                <h3>Active Sessions</h3>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Session</th>
+                    <th>Endpoint</th>
+                    <th>Client</th>
+                  <th>Destination</th>
+                  <th>Connected Since</th>
+                  <th>Up</th>
+                  <th>Down</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="sessions-table-body"></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="card detail-card">
+            <div class="panel-heading">
+              <div>
+                <span class="section-kicker">Endpoint Detail</span>
+                <h3 id="detail-title">Select an endpoint</h3>
+              </div>
+            </div>
+            <div id="detail-body" class="detail-body empty-state">
+              Choose <strong>View Sessions</strong> on any endpoint to inspect its SSH route, current sessions and dedicated traffic chart.
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <div id="modal-backdrop" class="modal-backdrop hidden">
+      <div class="modal card">
+        <div class="panel-heading">
+          <div>
+            <span class="section-kicker">Tunnel Form</span>
+            <h3 id="modal-title">New Tunnel</h3>
+          </div>
+          <button id="modal-close-button" class="icon-button" type="button" aria-label="Close">×</button>
+        </div>
+
+        <form id="endpoint-form" class="form-grid">
+            <input id="endpoint-id" type="hidden" />
+          <label>
+            <span>Tunnel Name</span>
+            <input id="endpoint-name" name="name" type="text" required />
+          </label>
+          <label>
+            <span>Type</span>
+            <input id="endpoint-type" name="type" type="text" value="SSH Local Forward" disabled />
+          </label>
+          <label>
+            <span>Listen Host</span>
+            <input id="listen-host" name="listen_host" type="text" value="0.0.0.0" required />
+          </label>
+          <label>
+            <span>Listen Port</span>
+            <input id="listen-port" name="listen_port" type="number" min="1024" max="65535" required />
+          </label>
+          <label>
+            <span>Destination Host</span>
+            <input id="destination-host" name="destination_host" type="text" required />
+          </label>
+          <label>
+            <span>Destination Port</span>
+            <input id="destination-port" name="destination_port" type="number" min="1024" max="65535" required />
+          </label>
+          <label>
+            <span>SSH Server Host</span>
+            <input id="ssh-host" name="ssh_host" type="text" required />
+          </label>
+          <label>
+            <span>SSH Port</span>
+            <input id="ssh-port" name="ssh_port" type="number" min="1" max="65535" value="22" required />
+          </label>
+          <label>
+            <span>SSH Username</span>
+            <input id="ssh-username" name="ssh_username" type="text" required />
+          </label>
+          <label>
+            <span>Private Key Path</span>
+            <input id="ssh-private-key-path" name="ssh_private_key_path" type="text" placeholder="Optional, use ssh-agent/default key if empty" />
+          </label>
+          <label>
+            <span>Known Hosts Path</span>
+            <input id="ssh-known-hosts-path" name="ssh_known_hosts_path" type="text" placeholder="Optional" />
+          </label>
+          <label>
+            <span>Extra SSH Options</span>
+            <input id="ssh-options" name="ssh_options" type="text" placeholder="-o ProxyJump=bastion" />
+          </label>
+          <label>
+            <span>Allowed Client CIDR</span>
+            <input id="allowed-client-cidr" name="allowed_client_cidr" type="text" placeholder="Optional" />
+          </label>
+          <label>
+            <span>Max Clients</span>
+            <input id="max-clients" name="max_clients" type="number" min="0" value="0" />
+          </label>
+          <label>
+            <span>Idle Timeout (s)</span>
+            <input id="idle-timeout" name="idle_timeout" type="number" min="0" value="0" />
+          </label>
+          <label>
+            <span>Tags</span>
+            <input id="tags" name="tags" type="text" placeholder="lab, qa, us" />
+          </label>
+          <label class="full-width">
+            <span>Description</span>
+            <textarea id="description" name="description" rows="4"></textarea>
+          </label>
+          <label class="toggle-row full-width">
+            <input id="enabled" name="enabled" type="checkbox" />
+            <span>Enable immediately</span>
+          </label>
+          <div class="modal-actions full-width">
+            <button id="save-button" class="ghost-button" type="submit">Save</button>
+            <button id="save-start-button" class="primary-button" type="button">Save and Start</button>
+            <button id="cancel-button" class="ghost-button" type="button">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

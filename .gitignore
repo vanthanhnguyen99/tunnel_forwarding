@@ -1,0 +1,24 @@
+# Local environment
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local data and secrets
+data/.app_secret
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Runtime artifacts
+runtime/*.log
+runtime/*.pid
+runtime/cookies*.txt
+
+# Common local tooling
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
