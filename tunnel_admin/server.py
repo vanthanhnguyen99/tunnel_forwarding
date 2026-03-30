@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -20,8 +19,8 @@ from urllib.parse import parse_qs, urlparse
 from .auth import AuthManager, hash_password, verify_password
 from .config import Settings
 from .docker_config import DockerConfigManager
+from .docker_runtime import DockerTunnelManager
 from .storage import Database
-from .tunnel import TunnelEngine
 
 
 LOGGER = logging.getLogger("tunnel_admin.server")
@@ -144,11 +143,11 @@ class AppContext:
         self.auth = AuthManager(settings.cookie_name, settings.auth_session_ttl)
         self.events = EventBroker()
         self.docker_config = DockerConfigManager(settings, self.db)
-        self.engine = TunnelEngine(
+        self.engine = DockerTunnelManager(
             database=self.db,
-            connect_timeout_seconds=settings.connect_timeout_seconds,
-            event_callback=self.publish_event,
             status_callback=self.db.update_endpoint_status_message,
+            docker_network_name=settings.docker_network_name,
+            docker_network_subnet=settings.docker_network_subnet,
         )
         self._stop_event = threading.Event()
         self._metrics_thread = threading.Thread(target=self._metrics_loop, daemon=True)
@@ -168,10 +167,13 @@ class AppContext:
             except Exception:
                 LOGGER.exception("Failed to sync Docker config for endpoint %s", endpoint["name"])
         for endpoint in self.db.list_endpoints():
-            if endpoint["enabled"]:
+            endpoint_id = int(endpoint["id"])
+            if endpoint["enabled"] and not self.engine.is_endpoint_running(endpoint_id):
                 started, message = self.engine.start_endpoint(endpoint)
                 if not started:
                     LOGGER.warning("Failed to auto-start endpoint %s: %s", endpoint["name"], message)
+            elif not endpoint["enabled"] and self.engine.is_endpoint_running(endpoint_id):
+                self.engine.stop_endpoint(endpoint_id, reason="endpoint_disabled", silence_missing=True)
         self._metrics_thread.start()
 
     def shutdown(self) -> None:
@@ -197,39 +199,31 @@ class AppContext:
 
     def list_endpoints(self) -> list[dict[str, Any]]:
         endpoints = self.db.list_endpoints()
-        active_sessions = self.engine.list_active_sessions()
-        traffic_totals = self.db.traffic_totals_by_endpoint()
-        active_by_endpoint: dict[int, dict[str, int]] = defaultdict(
-            lambda: {"active_clients": 0, "bytes_up": 0, "bytes_down": 0}
-        )
-
-        for session in active_sessions:
-            endpoint_id = int(session["endpoint_id"])
-            active_by_endpoint[endpoint_id]["active_clients"] += 1
-            active_by_endpoint[endpoint_id]["bytes_up"] += int(session["bytes_up"])
-            active_by_endpoint[endpoint_id]["bytes_down"] += int(session["bytes_down"])
+        runtime_metrics = self.engine.collect_runtime_metrics()["per_endpoint"]
 
         result: list[dict[str, Any]] = []
         for endpoint in endpoints:
             endpoint_id = int(endpoint["id"])
-            historical = traffic_totals.get(endpoint_id, {"bytes_up": 0, "bytes_down": 0})
-            runtime = active_by_endpoint.get(endpoint_id, {"active_clients": 0, "bytes_up": 0, "bytes_down": 0})
-            total_up = int(historical["bytes_up"]) + int(runtime["bytes_up"])
-            total_down = int(historical["bytes_down"]) + int(runtime["bytes_down"])
-            is_running = self.engine.is_endpoint_running(endpoint_id)
+            runtime = runtime_metrics.get(endpoint_id, {"active_connections": 0, "bytes_up": 0, "bytes_down": 0})
+            runtime_details = self.engine.get_endpoint_runtime_details(endpoint)
+            compose_state = str(runtime_details.get("compose_state") or "").lower()
+            is_running = compose_state == "running"
             runtime_status = "running" if is_running else ("disabled" if not endpoint["enabled"] else "stopped")
             ssh_target = self._format_ssh_target(endpoint)
+            total_up = int(runtime["bytes_up"])
+            total_down = int(runtime["bytes_down"])
 
             result.append(
                 {
                     **endpoint,
+                    "status_message": runtime_details.get("status_message") or endpoint.get("status_message"),
                     "runtime_status": runtime_status,
                     "listen": f"{endpoint['listen_host']}:{endpoint['listen_port']}",
                     "forward_to": f"{endpoint['destination_host']}:{endpoint['destination_port']}",
                     "ssh_target": ssh_target,
                     "transport": f"{endpoint['listen_host']}:{endpoint['listen_port']} -> "
                     f"{endpoint['destination_host']}:{endpoint['destination_port']} via {ssh_target}",
-                    "active_clients": int(runtime["active_clients"]),
+                    "active_clients": int(runtime["active_connections"]),
                     "bytes_up_total": total_up,
                     "bytes_down_total": total_down,
                     "traffic_total": total_up + total_down,

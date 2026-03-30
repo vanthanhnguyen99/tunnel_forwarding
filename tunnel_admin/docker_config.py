@@ -34,6 +34,7 @@ class DockerConfigManager:
 
         endpoint_dir = self.settings.docker_configs_dir / f"endpoint-{endpoint_id}"
         endpoint_dir.mkdir(parents=True, exist_ok=True)
+        (endpoint_dir / "commands").mkdir(parents=True, exist_ok=True)
 
         metadata = {
             "docker_nat_ip": docker_nat_ip,
@@ -70,6 +71,7 @@ class DockerConfigManager:
         endpoint: dict[str, Any],
         metadata: dict[str, str],
     ) -> tuple[dict[str, Any], str]:
+        endpoint_dir = str((self.settings.docker_configs_dir / f"endpoint-{int(endpoint['id'])}").resolve())
         runtime_config_path = metadata["docker_endpoint_config_path"]
         runtime_endpoint = {
             "id": int(endpoint["id"]),
@@ -96,8 +98,9 @@ class DockerConfigManager:
 
         bind_mounts = [
             {
-                "source": runtime_config_path,
-                "target": "/app_config/endpoint.json",
+                "source": endpoint_dir,
+                "target": "/app_data",
+                "read_only": False,
             }
         ]
 
@@ -107,6 +110,7 @@ class DockerConfigManager:
                 {
                     "source": str(ssh_dir.resolve()),
                     "target": "/root/.ssh",
+                    "read_only": True,
                 }
             )
 
@@ -117,6 +121,7 @@ class DockerConfigManager:
                 {
                     "source": str(Path(ssh_private_key_path).expanduser().resolve()),
                     "target": "/run/tunnel-secrets/ssh_private_key",
+                    "read_only": True,
                 }
             )
 
@@ -127,11 +132,14 @@ class DockerConfigManager:
                 {
                     "source": str(Path(ssh_known_hosts_path).expanduser().resolve()),
                     "target": "/run/tunnel-secrets/known_hosts",
+                    "read_only": True,
                 }
             )
 
         environment = {
             "PYTHONUNBUFFERED": "1",
+            "TUNNEL_RUNTIME_STATE_FILE": "/app_data/runtime.json",
+            "TUNNEL_COMMANDS_DIR": "/app_data/commands",
         }
         ssh_auth_sock = str(os.getenv("SSH_AUTH_SOCK") or "").strip()
         if ssh_auth_sock:
@@ -141,6 +149,7 @@ class DockerConfigManager:
                     {
                         "source": str(ssh_auth_sock_path.resolve()),
                         "target": "/run/host-services/ssh-auth.sock",
+                        "read_only": False,
                     }
                 )
                 environment["SSH_AUTH_SOCK"] = "/run/host-services/ssh-auth.sock"
@@ -158,7 +167,7 @@ class DockerConfigManager:
         *,
         endpoint: dict[str, Any],
         metadata: dict[str, str],
-        bind_mounts: list[dict[str, str]],
+        bind_mounts: list[dict[str, Any]],
         environment: dict[str, str],
     ) -> str:
         service_name = metadata["docker_service_name"]
@@ -173,9 +182,9 @@ class DockerConfigManager:
             "    build:",
             f"      context: {self._yaml_string(str(ROOT_DIR))}",
             f"      dockerfile: {self._yaml_string(str((ROOT_DIR / 'Dockerfile.tunnel-runner').resolve()))}",
-            "    restart: unless-stopped",
+            "    restart: \"no\"",
             "    command:",
-            f"      - {self._yaml_string('/app_config/endpoint.json')}",
+            f"      - {self._yaml_string('/app_data/endpoint.json')}",
             "    environment:",
         ]
 
@@ -196,7 +205,7 @@ class DockerConfigManager:
                     "      - type: bind",
                     f"        source: {self._yaml_string(mount['source'])}",
                     f"        target: {self._yaml_string(mount['target'])}",
-                    "        read_only: true",
+                    f"        read_only: {str(bool(mount.get('read_only', True))).lower()}",
                 ]
             )
 
@@ -209,10 +218,7 @@ class DockerConfigManager:
                 "networks:",
                 f"  {self.settings.docker_network_name}:",
                 f"    name: {self._yaml_string(self.settings.docker_network_name)}",
-                "    driver: bridge",
-                "    ipam:",
-                "      config:",
-                f"        - subnet: {self._yaml_string(self.settings.docker_network_subnet)}",
+                "    external: true",
                 "",
             ]
         )

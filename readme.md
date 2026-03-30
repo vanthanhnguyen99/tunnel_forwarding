@@ -130,8 +130,8 @@ Sau khi lưu:
 * config được ghi vào SQLite,
 * hệ thống tự gán một Docker NAT IP trong dải `172.20.0.0/16`,
 * hệ thống tự sinh `endpoint.json` và `docker-compose.yml` tương ứng cho tunnel đó,
-* nếu `enabled=true` thì app preflight SSH connectivity,
-* nếu preflight pass thì app mở local listening socket,
+* nếu `enabled=true` thì app chạy `docker compose up -d` để start container tunnel tương ứng,
+* tunnel SSH sẽ bind listen port bên trong container và expose ra host theo config admin,
 * endpoint xuất hiện ngay trên dashboard.
 
 ### Use case 2: Client connect vào tunnel

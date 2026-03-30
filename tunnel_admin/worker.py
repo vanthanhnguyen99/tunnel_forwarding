@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import logging
+import os
 from pathlib import Path
 import signal
 import sys
@@ -12,6 +14,10 @@ from .tunnel import TunnelEngine
 
 
 LOGGER = logging.getLogger("tunnel_admin.worker")
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class InMemorySessionStore:
@@ -45,6 +51,115 @@ class InMemorySessionStore:
         del session_id, status, bytes_up, bytes_down, close_reason
 
 
+class RuntimeStateMirror:
+    def __init__(
+        self,
+        endpoint: dict[str, Any],
+        engine: TunnelEngine | None,
+        state_file: Path,
+        commands_dir: Path,
+    ) -> None:
+        self.endpoint = endpoint
+        self.engine = engine
+        self.state_file = state_file
+        self.commands_dir = commands_dir
+        self._phase = "starting"
+        self._status_message: str | None = None
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def start(self) -> None:
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.commands_dir.mkdir(parents=True, exist_ok=True)
+        self.write_snapshot()
+        self._thread.start()
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.5)
+
+    def set_phase(self, phase: str) -> None:
+        with self._lock:
+            self._phase = phase
+
+    def set_status_message(self, message: str | None) -> None:
+        with self._lock:
+            self._status_message = message
+
+    def write_snapshot(self) -> None:
+        payload = self._build_snapshot()
+        tmp_path = self.state_file.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp_path.replace(self.state_file)
+
+    def _loop(self) -> None:
+        while not self._stop_event.wait(1.0):
+            self._process_commands()
+            self.write_snapshot()
+
+    def _process_commands(self) -> None:
+        if self.engine is None:
+            return
+        if not self.commands_dir.exists():
+            return
+        for command_path in sorted(self.commands_dir.glob("*.json")):
+            try:
+                payload = json.loads(command_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+            action = str(payload.get("action") or "").strip().lower()
+            if action == "disconnect_session":
+                try:
+                    session_id = int(payload.get("session_id"))
+                except (TypeError, ValueError):
+                    session_id = 0
+                if session_id > 0:
+                    self.engine.disconnect_session(session_id, reason="admin_disconnect")
+            try:
+                command_path.unlink()
+            except OSError:
+                LOGGER.warning("failed to remove command file %s", command_path)
+
+    def _build_snapshot(self) -> dict[str, Any]:
+        if self.engine is None:
+            endpoint_metrics = {"active_connections": 0, "bytes_up": 0, "bytes_down": 0}
+            sessions: list[dict[str, Any]] = []
+        else:
+            runtime = self.engine.collect_runtime_metrics()
+            endpoint_metrics = runtime["per_endpoint"].get(
+                int(self.endpoint["id"]),
+                {"active_connections": 0, "bytes_up": 0, "bytes_down": 0},
+            )
+            sessions = []
+            for session in self.engine.list_active_sessions(endpoint_id=int(self.endpoint["id"])):
+                local_session_id = int(session["id"])
+                sessions.append(
+                    {
+                        **session,
+                        "id": local_session_id,
+                        "local_session_id": local_session_id,
+                    }
+                )
+        with self._lock:
+            phase = self._phase
+            status_message = self._status_message
+        return {
+            "endpoint_id": int(self.endpoint["id"]),
+            "endpoint_name": self.endpoint["name"],
+            "phase": phase,
+            "status_message": status_message,
+            "updated_at": utc_now_iso(),
+            "metrics": {
+                "active_connections": int(endpoint_metrics["active_connections"]),
+                "bytes_up": int(endpoint_metrics["bytes_up"]),
+                "bytes_down": int(endpoint_metrics["bytes_down"]),
+            },
+            "active_sessions": sessions,
+        }
+
+
 def configure_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -72,14 +187,23 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     config_path = Path(args[0]).expanduser().resolve()
     endpoint, connect_timeout_seconds = load_runtime_config(config_path)
+    state_file = Path(
+        os.getenv("TUNNEL_RUNTIME_STATE_FILE") or str(config_path.with_name("runtime.json"))
+    ).expanduser().resolve()
+    commands_dir = Path(
+        os.getenv("TUNNEL_COMMANDS_DIR") or str(config_path.with_name("commands"))
+    ).expanduser().resolve()
 
     session_store = InMemorySessionStore()
     stop_event = threading.Event()
+    mirror = RuntimeStateMirror(endpoint, None, state_file, commands_dir)
 
     def handle_event(event_name: str, data: dict[str, Any]) -> None:
         LOGGER.info("event=%s payload=%s", event_name, json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+        mirror.write_snapshot()
 
     def handle_status(endpoint_id: int, message: str | None) -> None:
+        mirror.set_status_message(message)
         if message:
             LOGGER.warning("endpoint=%s status=%s", endpoint_id, message)
         else:
@@ -91,11 +215,18 @@ def main(argv: list[str] | None = None) -> int:
         event_callback=handle_event,
         status_callback=handle_status,
     )
+    mirror.engine = engine
 
     started, message = engine.start_endpoint(endpoint)
     if not started:
+        mirror.set_phase("error")
+        mirror.set_status_message(message)
+        mirror.write_snapshot()
         LOGGER.error("failed_to_start endpoint=%s reason=%s", endpoint.get("name"), message)
         return 1
+    mirror.set_phase("running")
+    mirror.set_status_message(None)
+    mirror.start()
 
     def request_shutdown(signum: int, _frame: Any) -> None:
         LOGGER.info("received signal=%s, stopping worker", signum)
@@ -107,7 +238,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         stop_event.wait()
     finally:
+        mirror.set_phase("stopping")
         engine.shutdown()
+        mirror.set_phase("stopped")
+        mirror.set_status_message(None)
+        mirror.write_snapshot()
+        mirror.request_stop()
     return 0
 
 
