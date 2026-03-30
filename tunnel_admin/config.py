@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import os
 import secrets
@@ -28,6 +29,17 @@ def _load_or_create_secret(secret_file: Path) -> str:
     return secret
 
 
+def _default_docker_runner_image() -> str:
+    digest = hashlib.sha256()
+    tracked_paths = [ROOT_DIR / "Dockerfile.tunnel-runner", *sorted((ROOT_DIR / "tunnel_admin").rglob("*.py"))]
+    for path in tracked_paths:
+        digest.update(path.relative_to(ROOT_DIR).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return f"tunnel-forwarding-runner:{digest.hexdigest()[:12]}"
+
+
 @dataclass(slots=True)
 class Settings:
     host: str
@@ -48,6 +60,7 @@ class Settings:
     shutdown_grace_seconds: float
     docker_network_name: str
     docker_network_subnet: str
+    docker_runner_image: str
 
     @classmethod
     def load(cls) -> "Settings":
@@ -81,4 +94,5 @@ class Settings:
             shutdown_grace_seconds=float(os.getenv("SHUTDOWN_GRACE_SECONDS", "5")),
             docker_network_name=os.getenv("APP_DOCKER_NETWORK_NAME", "tunnel_nat"),
             docker_network_subnet=os.getenv("APP_DOCKER_NETWORK_SUBNET", "172.20.0.0/16"),
+            docker_runner_image=os.getenv("APP_DOCKER_RUNNER_IMAGE", _default_docker_runner_image()),
         )

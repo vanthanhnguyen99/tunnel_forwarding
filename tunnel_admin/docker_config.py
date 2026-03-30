@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 from typing import Any
 
-from .config import ROOT_DIR, Settings
+from .config import Settings
 
 
 LOGGER = logging.getLogger("tunnel_admin.docker_config")
@@ -179,9 +179,7 @@ class DockerConfigManager:
             "services:",
             f"  {service_name}:",
             f"    container_name: {self._yaml_string(metadata['docker_container_name'])}",
-            "    build:",
-            f"      context: {self._yaml_string(str(ROOT_DIR))}",
-            f"      dockerfile: {self._yaml_string(str((ROOT_DIR / 'Dockerfile.tunnel-runner').resolve()))}",
+            f"    image: {self._yaml_string(self.settings.docker_runner_image)}",
             "    restart: \"no\"",
             "    command:",
             f"      - {self._yaml_string('/app_data/endpoint.json')}",

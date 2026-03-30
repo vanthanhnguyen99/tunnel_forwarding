@@ -9,6 +9,8 @@ import subprocess
 import time
 from typing import Any
 
+from .config import ROOT_DIR
+
 
 LOGGER = logging.getLogger("tunnel_admin.docker_runtime")
 
@@ -34,11 +36,13 @@ class DockerTunnelManager:
         status_callback: Any,
         docker_network_name: str,
         docker_network_subnet: str,
+        docker_runner_image: str,
     ) -> None:
         self.database = database
         self.status_callback = status_callback
         self.docker_network_name = docker_network_name
         self.docker_network_subnet = docker_network_subnet
+        self.docker_runner_image = docker_runner_image
 
     def shutdown(self) -> None:
         return None
@@ -61,7 +65,12 @@ class DockerTunnelManager:
             self.status_callback(endpoint_id, network_message)
             return False, network_message
 
-        result = self._run_compose(endpoint, "up", "-d", "--build", "--force-recreate", "--remove-orphans")
+        image_ready, image_message = self._ensure_runner_image()
+        if not image_ready:
+            self.status_callback(endpoint_id, image_message)
+            return False, image_message
+
+        result = self._run_compose(endpoint, "up", "-d", "--no-build", "--force-recreate", "--remove-orphans")
         if result.returncode != 0:
             message = _decode_text(result.stderr) or _decode_text(result.stdout) or "docker compose up failed"
             self.status_callback(endpoint_id, message)
@@ -295,6 +304,52 @@ class DockerTunnelManager:
             message = _decode_text(create.stderr) or _decode_text(create.stdout) or "Failed to create Docker network"
             return False, message
         return True, None
+
+    def _ensure_runner_image(self) -> tuple[bool, str | None]:
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", self.docker_runner_image],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if inspect.returncode == 0:
+            return True, None
+
+        build = subprocess.run(
+            [
+                "docker",
+                "build",
+                "-t",
+                self.docker_runner_image,
+                "-f",
+                str((ROOT_DIR / "Dockerfile.tunnel-runner").resolve()),
+                str(ROOT_DIR),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if build.returncode != 0:
+            message = (
+                _decode_text(build.stderr)
+                or _decode_text(build.stdout)
+                or f"Failed to build Docker runner image {self.docker_runner_image}"
+            )
+            return False, self._format_runner_image_error(message)
+        return True, None
+
+    def _format_runner_image_error(self, message: str) -> str:
+        normalized = message.lower()
+        if "toomanyrequests" in normalized or "too many requests" in normalized or "429" in normalized:
+            return (
+                f"{message}\n"
+                "Docker Hub rate limit hit while building the shared tunnel runner image. "
+                "Run `docker login` on this server, or prebuild/push the image and point "
+                "`APP_DOCKER_RUNNER_IMAGE` at that tag."
+            )
+        return message
 
     @staticmethod
     def _parse_compose_ps_output(output: str) -> list[dict[str, Any]]:
