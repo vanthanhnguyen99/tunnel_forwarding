@@ -309,7 +309,9 @@ function getFilteredEndpoints() {
       endpoint.name.toLowerCase().includes(search) ||
       endpoint.listen.toLowerCase().includes(search) ||
       endpoint.forward_to.toLowerCase().includes(search) ||
-      (endpoint.ssh_target || "").toLowerCase().includes(search);
+      (endpoint.ssh_target || "").toLowerCase().includes(search) ||
+      (endpoint.docker_nat_ip || "").toLowerCase().includes(search) ||
+      (endpoint.docker_container_name || "").toLowerCase().includes(search);
     const matchesStatus = status === "all" || endpoint.runtime_status === status;
     return matchesSearch && matchesStatus;
   });
@@ -365,7 +367,7 @@ function renderOverview() {
 function renderEndpoints() {
   const endpoints = getFilteredEndpoints();
   if (!endpoints.length) {
-    els.endpointsTableBody.innerHTML = `<tr><td colspan="9" class="empty-cell">No endpoints match the current filter.</td></tr>`;
+    els.endpointsTableBody.innerHTML = `<tr><td colspan="10" class="empty-cell">No endpoints match the current filter.</td></tr>`;
     return;
   }
 
@@ -382,6 +384,10 @@ function renderEndpoints() {
           <td><code>${escapeHtml(endpoint.listen)}</code></td>
           <td><code>${escapeHtml(endpoint.ssh_target || "unconfigured")}</code></td>
           <td><code>${escapeHtml(endpoint.forward_to)}</code></td>
+          <td>
+            <code>${escapeHtml(endpoint.docker_nat_ip || "unassigned")}</code>
+            <div class="row-subtitle">${escapeHtml(endpoint.docker_container_name || "container pending")}</div>
+          </td>
           <td>
             <span class="status-badge status-${endpoint.runtime_status}">
               ${escapeHtml(endpoint.runtime_status)}
@@ -472,6 +478,18 @@ function renderDetail() {
         <strong>${escapeHtml(endpoint.runtime_status)}</strong>
       </div>
       <div class="detail-item">
+        <span>Docker NAT IP</span>
+        <strong><code>${escapeHtml(endpoint.docker_nat_ip || "unassigned")}</code></strong>
+      </div>
+      <div class="detail-item">
+        <span>Docker Network</span>
+        <strong>${escapeHtml(endpoint.docker_network_name || "tunnel_nat")}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Container Name</span>
+        <strong>${escapeHtml(endpoint.docker_container_name || "pending")}</strong>
+      </div>
+      <div class="detail-item">
         <span>Allowed CIDR</span>
         <strong>${escapeHtml(endpoint.allowed_client_cidr || "Any")}</strong>
       </div>
@@ -490,6 +508,14 @@ function renderDetail() {
       <div class="detail-item">
         <span>Extra SSH Options</span>
         <strong>${escapeHtml(endpoint.ssh_options || "None")}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Docker Compose</span>
+        <strong><code>${escapeHtml(endpoint.docker_compose_path || "Not generated")}</code></strong>
+      </div>
+      <div class="detail-item">
+        <span>Runtime Config</span>
+        <strong><code>${escapeHtml(endpoint.docker_endpoint_config_path || "Not generated")}</code></strong>
       </div>
     </div>
     <div class="detail-description">${escapeHtml(endpoint.description || "No description provided.")}</div>

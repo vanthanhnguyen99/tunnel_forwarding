@@ -35,6 +35,7 @@ class Settings:
     data_dir: Path
     runtime_dir: Path
     static_dir: Path
+    docker_configs_dir: Path
     db_path: Path
     secret: str
     cookie_name: str
@@ -45,14 +46,18 @@ class Settings:
     metrics_window_seconds: int
     connect_timeout_seconds: float
     shutdown_grace_seconds: float
+    docker_network_name: str
+    docker_network_subnet: str
 
     @classmethod
     def load(cls) -> "Settings":
         data_dir = Path(os.getenv("APP_DATA_DIR", ROOT_DIR / "data")).resolve()
         runtime_dir = Path(os.getenv("APP_RUNTIME_DIR", ROOT_DIR / "runtime")).resolve()
         static_dir = Path(os.getenv("APP_STATIC_DIR", ROOT_DIR / "tunnel_admin" / "static")).resolve()
+        docker_configs_dir = Path(os.getenv("APP_DOCKER_CONFIG_DIR", data_dir / "docker")).resolve()
         data_dir.mkdir(parents=True, exist_ok=True)
         runtime_dir.mkdir(parents=True, exist_ok=True)
+        docker_configs_dir.mkdir(parents=True, exist_ok=True)
 
         secret_file = data_dir / ".app_secret"
         secret = os.getenv("APP_SECRET") or _load_or_create_secret(secret_file)
@@ -63,6 +68,7 @@ class Settings:
             data_dir=data_dir,
             runtime_dir=runtime_dir,
             static_dir=static_dir,
+            docker_configs_dir=docker_configs_dir,
             db_path=Path(os.getenv("APP_DB_PATH", data_dir / "tunnel_admin.db")).resolve(),
             secret=secret,
             cookie_name=os.getenv("AUTH_COOKIE_NAME", "tunnel_admin_session"),
@@ -73,4 +79,6 @@ class Settings:
             metrics_window_seconds=max(30, _env_int("METRICS_WINDOW_SECONDS", 300)),
             connect_timeout_seconds=float(os.getenv("UPSTREAM_CONNECT_TIMEOUT_SECONDS", "5")),
             shutdown_grace_seconds=float(os.getenv("SHUTDOWN_GRACE_SECONDS", "5")),
+            docker_network_name=os.getenv("APP_DOCKER_NETWORK_NAME", "tunnel_nat"),
+            docker_network_subnet=os.getenv("APP_DOCKER_NETWORK_SUBNET", "172.20.0.0/16"),
         )

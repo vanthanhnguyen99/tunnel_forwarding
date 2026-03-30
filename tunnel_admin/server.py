@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .auth import AuthManager, hash_password, verify_password
 from .config import Settings
+from .docker_config import DockerConfigManager
 from .storage import Database
 from .tunnel import TunnelEngine
 
@@ -142,6 +143,7 @@ class AppContext:
         self.db = Database(str(settings.db_path))
         self.auth = AuthManager(settings.cookie_name, settings.auth_session_ttl)
         self.events = EventBroker()
+        self.docker_config = DockerConfigManager(settings, self.db)
         self.engine = TunnelEngine(
             database=self.db,
             connect_timeout_seconds=settings.connect_timeout_seconds,
@@ -159,6 +161,12 @@ class AppContext:
     def start(self) -> None:
         self.db.initialize()
         self._ensure_default_admin()
+        endpoints = self.db.list_endpoints()
+        for endpoint in endpoints:
+            try:
+                self.docker_config.sync_endpoint(endpoint)
+            except Exception:
+                LOGGER.exception("Failed to sync Docker config for endpoint %s", endpoint["name"])
         for endpoint in self.db.list_endpoints():
             if endpoint["enabled"]:
                 started, message = self.engine.start_endpoint(endpoint)
@@ -283,6 +291,7 @@ class AppContext:
     def create_endpoint(self, payload: dict[str, Any], actor: str) -> dict[str, Any]:
         clean_payload = self._validate_endpoint_payload(payload)
         endpoint = self.db.create_endpoint(clean_payload)
+        endpoint = self.docker_config.sync_endpoint(endpoint)
         self.db.record_audit(actor=actor, action="endpoint.created", endpoint_id=int(endpoint["id"]), details=endpoint["name"])
         if endpoint["enabled"]:
             self.engine.start_endpoint(endpoint)
@@ -301,6 +310,7 @@ class AppContext:
         updated = self.db.get_endpoint(endpoint_id)
         if updated is None:
             raise HttpError(HTTPStatus.NOT_FOUND, "Endpoint not found after update")
+        updated = self.docker_config.sync_endpoint(updated)
         if updated["enabled"]:
             self.engine.start_endpoint(updated)
         else:
@@ -319,6 +329,7 @@ class AppContext:
         if endpoint is None:
             raise HttpError(HTTPStatus.NOT_FOUND, "Endpoint not found")
         self.engine.stop_endpoint(endpoint_id, reason="endpoint_deleted", silence_missing=True)
+        self.docker_config.delete_endpoint_artifacts(endpoint)
         self.db.record_audit(actor=actor, action="endpoint.deleted", endpoint_id=endpoint_id, details=endpoint["name"])
         self.db.delete_endpoint(endpoint_id)
         self.publish_event("endpoint.deleted", {"id": endpoint_id, "name": endpoint["name"]})

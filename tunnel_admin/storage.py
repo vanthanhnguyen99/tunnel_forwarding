@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import ipaddress
 import sqlite3
 import threading
 from typing import Any
@@ -51,9 +52,20 @@ class Database:
             max_clients INTEGER NOT NULL DEFAULT 0,
             idle_timeout INTEGER NOT NULL DEFAULT 0,
             tags TEXT NOT NULL DEFAULT '',
+            docker_nat_ip TEXT,
+            docker_network_name TEXT,
+            docker_service_name TEXT,
+            docker_container_name TEXT,
+            docker_compose_path TEXT,
+            docker_endpoint_config_path TEXT,
             status_message TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS app_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -112,6 +124,12 @@ class Database:
             "ssh_private_key_path": "TEXT",
             "ssh_known_hosts_path": "TEXT",
             "ssh_options": "TEXT NOT NULL DEFAULT ''",
+            "docker_nat_ip": "TEXT",
+            "docker_network_name": "TEXT",
+            "docker_service_name": "TEXT",
+            "docker_container_name": "TEXT",
+            "docker_compose_path": "TEXT",
+            "docker_endpoint_config_path": "TEXT",
         }
         for column_name, definition in expected_columns.items():
             if column_name in existing:
@@ -307,6 +325,79 @@ class Database:
                 "UPDATE endpoints SET status_message = ?, updated_at = ? WHERE id = ?",
                 (message, utc_now_iso(), endpoint_id),
             )
+
+    def update_endpoint_docker_metadata(self, endpoint_id: int, metadata: dict[str, Any]) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE endpoints
+                SET docker_nat_ip = ?,
+                    docker_network_name = ?,
+                    docker_service_name = ?,
+                    docker_container_name = ?,
+                    docker_compose_path = ?,
+                    docker_endpoint_config_path = ?
+                WHERE id = ?
+                """,
+                (
+                    metadata.get("docker_nat_ip"),
+                    metadata.get("docker_network_name"),
+                    metadata.get("docker_service_name"),
+                    metadata.get("docker_container_name"),
+                    metadata.get("docker_compose_path"),
+                    metadata.get("docker_endpoint_config_path"),
+                    endpoint_id,
+                ),
+            )
+
+    def allocate_next_docker_nat_ip(self, subnet_cidr: str) -> str:
+        subnet = ipaddress.ip_network(subnet_cidr, strict=True)
+        if subnet.version != 4:
+            raise RuntimeError("Only IPv4 Docker NAT subnets are supported")
+
+        start_offset = 2
+        last_usable_offset = subnet.num_addresses - 2
+        metadata_key = "docker_next_host_offset"
+
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT value FROM app_metadata WHERE key = ?",
+                (metadata_key,),
+            ).fetchone()
+            next_offset = int(row["value"]) if row is not None else self._find_next_docker_offset_locked(subnet)
+            next_offset = max(start_offset, next_offset)
+            if next_offset > last_usable_offset:
+                raise RuntimeError(f"Docker subnet {subnet_cidr} is exhausted")
+
+            allocated_ip = str(subnet.network_address + next_offset)
+            self._connection.execute(
+                """
+                INSERT INTO app_metadata (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (metadata_key, str(next_offset + 1)),
+            )
+        return allocated_ip
+
+    def _find_next_docker_offset_locked(self, subnet: ipaddress.IPv4Network) -> int:
+        rows = self._connection.execute(
+            "SELECT docker_nat_ip FROM endpoints WHERE docker_nat_ip IS NOT NULL AND docker_nat_ip != ''"
+        ).fetchall()
+        highest_offset = 1
+        network_base = int(subnet.network_address)
+        for row in rows:
+            value = row["docker_nat_ip"]
+            if not value:
+                continue
+            try:
+                address = ipaddress.ip_address(str(value))
+            except ValueError:
+                continue
+            if address.version != 4 or address not in subnet:
+                continue
+            highest_offset = max(highest_offset, int(address) - network_base)
+        return highest_offset + 1
 
     def create_session_record(
         self,
