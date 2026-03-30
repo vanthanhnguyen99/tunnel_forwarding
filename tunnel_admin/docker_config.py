@@ -171,7 +171,6 @@ class DockerConfigManager:
         environment: dict[str, str],
     ) -> str:
         service_name = metadata["docker_service_name"]
-        port_binding = self._build_port_binding(str(endpoint["listen_host"]), int(endpoint["listen_port"]))
 
         lines = [
             f"name: {self._yaml_string(service_name)}",
@@ -191,8 +190,6 @@ class DockerConfigManager:
 
         lines.extend(
             [
-                "    ports:",
-                f"      - {self._yaml_string(port_binding)}",
                 "    volumes:",
             ]
         )
@@ -232,19 +229,6 @@ class DockerConfigManager:
         except ValueError:
             return "0.0.0.0"
         return "::" if address.version == 6 else "0.0.0.0"
-
-    @staticmethod
-    def _build_port_binding(listen_host: str, listen_port: int) -> str:
-        host = listen_host.strip()
-        if not host or host == "*":
-            return f"{listen_port}:{listen_port}/tcp"
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError:
-            return f"{listen_port}:{listen_port}/tcp"
-        if address.version == 6:
-            return f"[{host}]:{listen_port}:{listen_port}/tcp"
-        return f"{host}:{listen_port}:{listen_port}/tcp"
 
     @staticmethod
     def _yaml_string(value: str) -> str:

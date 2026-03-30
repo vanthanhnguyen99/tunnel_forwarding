@@ -109,13 +109,6 @@ def _parse_non_negative_int(value: Any, field_name: str) -> int:
     return number
 
 
-def _hosts_conflict(host_a: str, host_b: str) -> bool:
-    wildcard_hosts = {"0.0.0.0", "::", "", "*"}
-    a = host_a.strip().lower()
-    b = host_b.strip().lower()
-    return a == b or a in wildcard_hosts or b in wildcard_hosts
-
-
 @dataclass(slots=True)
 class OverviewSummary:
     total_endpoints: int
@@ -211,6 +204,7 @@ class AppContext:
             is_running = compose_state == "running"
             runtime_status = "running" if is_running else ("disabled" if not endpoint["enabled"] else "stopped")
             ssh_target = self._format_ssh_target(endpoint)
+            container_listen = self._format_container_listen(endpoint)
             total_up = int(runtime["bytes_up"])
             total_down = int(runtime["bytes_down"])
 
@@ -219,11 +213,12 @@ class AppContext:
                     **endpoint,
                     "status_message": runtime_details.get("status_message") or endpoint.get("status_message"),
                     "runtime_status": runtime_status,
-                    "listen": f"{endpoint['listen_host']}:{endpoint['listen_port']}",
+                    "listen": container_listen,
                     "forward_to": f"{endpoint['destination_host']}:{endpoint['destination_port']}",
                     "ssh_target": ssh_target,
-                    "transport": f"{endpoint['listen_host']}:{endpoint['listen_port']} -> "
+                    "transport": f"{container_listen} -> "
                     f"{endpoint['destination_host']}:{endpoint['destination_port']} via {ssh_target}",
+                    "container_bind": f"{endpoint['listen_host']}:{endpoint['listen_port']}",
                     "active_clients": int(runtime["active_connections"]),
                     "bytes_up_total": total_up,
                     "bytes_down_total": total_down,
@@ -450,13 +445,6 @@ class AppContext:
             if str(endpoint["name"]).lower() == str(candidate["name"]).lower():
                 raise HttpError(HTTPStatus.BAD_REQUEST, "Endpoint name already exists")
 
-            same_port = int(endpoint["listen_port"]) == int(candidate["listen_port"])
-            if same_port and _hosts_conflict(str(endpoint["listen_host"]), str(candidate["listen_host"])):
-                raise HttpError(
-                    HTTPStatus.BAD_REQUEST,
-                    "Listen host/port conflicts with an existing endpoint",
-                )
-
     def _validate_ssh_paths(self, endpoint: dict[str, Any]) -> None:
         for field_name in ("ssh_private_key_path", "ssh_known_hosts_path"):
             candidate = endpoint.get(field_name)
@@ -476,6 +464,16 @@ class AppContext:
         if not ssh_host or not ssh_username:
             return "unconfigured"
         return f"{ssh_username}@{ssh_host}:{ssh_port}"
+
+    @staticmethod
+    def _format_container_listen(endpoint: dict[str, Any]) -> str:
+        container_ip = _sanitize_text(endpoint.get("docker_nat_ip"), max_length=100)
+        listen_port = endpoint.get("listen_port")
+        if container_ip and listen_port:
+            return f"{container_ip}:{listen_port}"
+        if listen_port:
+            return f"container:{listen_port}"
+        return "pending"
 
     def _metrics_loop(self) -> None:
         retention_seconds = max(self.settings.metrics_window_seconds * 12, 86400)

@@ -460,10 +460,14 @@ function renderDetail() {
   els.detailTitle.textContent = endpoint.name;
   els.detailBody.className = "detail-body";
   els.detailBody.innerHTML = `
-    <div class="detail-grid">
+      <div class="detail-grid">
       <div class="detail-item">
-        <span>Listen</span>
+        <span>Container Listen</span>
         <strong>${escapeHtml(endpoint.listen)}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Container Bind</span>
+        <strong>${escapeHtml(endpoint.container_bind || "pending")}</strong>
       </div>
       <div class="detail-item">
         <span>Forward To</span>
