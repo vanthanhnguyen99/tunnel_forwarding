@@ -670,6 +670,33 @@ function closeModal() {
   els.modalBackdrop.classList.add("hidden");
 }
 
+function validatePortInput(input, label) {
+  const rawValue = input.value.trim();
+  let message = "";
+
+  if (!rawValue) {
+    message = `${label} is required.`;
+  } else {
+    const value = Number(rawValue);
+    if (!Number.isInteger(value) || value < 1 || value > 65535) {
+      message = `${label} must be an integer between 1 and 65535.`;
+    }
+  }
+
+  input.setCustomValidity(message);
+  return message === "";
+}
+
+function validateEndpointForm() {
+  const isListenPortValid = validatePortInput(els.listenPort, "Listen Port");
+  const isDestinationPortValid = validatePortInput(els.destinationPort, "Destination Port");
+  const isFormValid = isListenPortValid && isDestinationPortValid;
+  if (!isFormValid) {
+    els.endpointForm.reportValidity();
+  }
+  return isFormValid;
+}
+
 function collectFormPayload() {
   return {
     name: els.endpointName.value.trim(),
@@ -695,6 +722,9 @@ function collectFormPayload() {
 
 async function submitEndpointForm(event) {
   event.preventDefault();
+  if (!validateEndpointForm()) {
+    return;
+  }
   const endpointId = els.endpointId.value;
   const payload = collectFormPayload();
   try {
@@ -825,6 +855,8 @@ function bindEvents() {
     state.pendingSaveMode = "save";
   });
   els.endpointForm.addEventListener("submit", submitEndpointForm);
+  els.listenPort.addEventListener("input", () => validatePortInput(els.listenPort, "Listen Port"));
+  els.destinationPort.addEventListener("input", () => validatePortInput(els.destinationPort, "Destination Port"));
   els.searchInput.addEventListener("input", renderEndpoints);
   els.statusFilter.addEventListener("change", renderEndpoints);
   els.endpointsTableBody.addEventListener("click", handleEndpointAction);
