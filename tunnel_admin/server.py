@@ -84,8 +84,8 @@ def _parse_port(value: Any, field_name: str) -> int:
         port = int(value)
     except (TypeError, ValueError) as exc:
         raise HttpError(HTTPStatus.BAD_REQUEST, f"{field_name} must be an integer") from exc
-    if not 1024 <= port <= 65535:
-        raise HttpError(HTTPStatus.BAD_REQUEST, f"{field_name} must be between 1024 and 65535")
+    if not 1 <= port <= 65535:
+        raise HttpError(HTTPStatus.BAD_REQUEST, f"{field_name} must be between 1 and 65535")
     return port
 
 
