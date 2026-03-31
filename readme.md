@@ -485,12 +485,6 @@ Biến quan trọng:
 http://127.0.0.1:2020
 ```
 
-### Default admin
-
-Nếu không đổi `.env`:
-
-* user: `admin`
-* pass: `admin123`
 
 ---
 
