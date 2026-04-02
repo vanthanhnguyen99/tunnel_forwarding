@@ -20,6 +20,18 @@ def _env_int(name: str, default: int) -> int:
         raise ValueError(f"Invalid integer for {name}: {value}") from exc
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean for {name}: {value}")
+
+
 def _load_or_create_secret(secret_file: Path) -> str:
     if secret_file.exists():
         return secret_file.read_text(encoding="utf-8").strip()
@@ -61,6 +73,10 @@ class Settings:
     docker_network_name: str
     docker_network_subnet: str
     docker_runner_image: str
+    apply_iptables_on_endpoint_start: bool
+    iptables_source_subnet: str
+    iptables_input_interface: str
+    iptables_output_interface: str
 
     @classmethod
     def load(cls) -> "Settings":
@@ -95,4 +111,8 @@ class Settings:
             docker_network_name=os.getenv("APP_DOCKER_NETWORK_NAME", "tunnel_nat"),
             docker_network_subnet=os.getenv("APP_DOCKER_NETWORK_SUBNET", "172.20.0.0/16"),
             docker_runner_image=os.getenv("APP_DOCKER_RUNNER_IMAGE", _default_docker_runner_image()),
+            apply_iptables_on_endpoint_start=_env_bool("APP_APPLY_IPTABLES_ON_ENDPOINT_START", True),
+            iptables_source_subnet=os.getenv("APP_IPTABLES_SOURCE_SUBNET", "172.31.250.0/24"),
+            iptables_input_interface=os.getenv("APP_IPTABLES_INPUT_INTERFACE", "tun0"),
+            iptables_output_interface=os.getenv("APP_IPTABLES_OUTPUT_INTERFACE", "eth1"),
         )

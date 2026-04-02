@@ -37,12 +37,20 @@ class DockerTunnelManager:
         docker_network_name: str,
         docker_network_subnet: str,
         docker_runner_image: str,
+        apply_iptables_on_endpoint_start: bool,
+        iptables_source_subnet: str,
+        iptables_input_interface: str,
+        iptables_output_interface: str,
     ) -> None:
         self.database = database
         self.status_callback = status_callback
         self.docker_network_name = docker_network_name
         self.docker_network_subnet = docker_network_subnet
         self.docker_runner_image = docker_runner_image
+        self.apply_iptables_on_endpoint_start = apply_iptables_on_endpoint_start
+        self.iptables_source_subnet = iptables_source_subnet
+        self.iptables_input_interface = iptables_input_interface
+        self.iptables_output_interface = iptables_output_interface
 
     def shutdown(self) -> None:
         return None
@@ -80,6 +88,12 @@ class DockerTunnelManager:
             message = "Container did not reach running state after docker compose up"
             self.status_callback(endpoint_id, message)
             return False, message
+
+        iptables_ready, iptables_message = self._apply_iptables_rules()
+        if not iptables_ready:
+            self._run_compose(endpoint, "down", "--remove-orphans", "--timeout", "2")
+            self.status_callback(endpoint_id, iptables_message)
+            return False, iptables_message
 
         self.status_callback(endpoint_id, None)
         return True, None
@@ -350,6 +364,64 @@ class DockerTunnelManager:
                 "`APP_DOCKER_RUNNER_IMAGE` at that tag."
             )
         return message
+
+    def _apply_iptables_rules(self) -> tuple[bool, str | None]:
+        if not self.apply_iptables_on_endpoint_start:
+            return True, None
+        if shutil.which("iptables") is None:
+            return False, "iptables CLI is not available on this host"
+
+        commands = [
+            ["iptables", "-w", "-F"],
+            ["iptables", "-w", "-t", "nat", "-F"],
+            ["iptables", "-w", "-A", "FORWARD", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+            [
+                "iptables",
+                "-w",
+                "-A",
+                "FORWARD",
+                "-i",
+                self.iptables_input_interface,
+                "-o",
+                self.iptables_output_interface,
+                "-s",
+                self.iptables_source_subnet,
+                "-d",
+                self.docker_network_subnet,
+                "-j",
+                "ACCEPT",
+            ],
+            ["iptables", "-w", "-A", "FORWARD", "-i", self.iptables_input_interface, "-j", "DROP"],
+            [
+                "iptables",
+                "-w",
+                "-t",
+                "nat",
+                "-A",
+                "POSTROUTING",
+                "-s",
+                self.iptables_source_subnet,
+                "-d",
+                self.docker_network_subnet,
+                "-o",
+                self.iptables_output_interface,
+                "-j",
+                "MASQUERADE",
+            ],
+        ]
+        for command in commands:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                continue
+            message = _decode_text(result.stderr) or _decode_text(result.stdout) or "iptables command failed"
+            return False, f"Failed to apply iptables rule `{ ' '.join(command) }`: {message}"
+        return True, None
 
     @staticmethod
     def _parse_compose_ps_output(output: str) -> list[dict[str, Any]]:
