@@ -1,16 +1,10 @@
 # MVP project: Web quản trị SSH tunneling kiểu MobaXterm
 
-## 1. Sửa lại spec gốc
+## 1. Mô hình tunnel
 
-Spec cũ trong repo mô tả một hệ thống **direct TCP forward**:
+Project này dùng mô hình **SSH Local Forward** kiểu MobaXterm.
 
-* app bind local port,
-* app tự mở TCP connection trực tiếp tới destination host:port,
-* relay 2 chiều.
-
-Cách đó **không đúng tinh thần tunneling của MobaXterm**.
-
-Với MobaXterm local tunneling, đường đi đúng là:
+Luồng kết nối:
 
 ```text
 Local client
@@ -25,19 +19,18 @@ SSH connection to SSH server
 Destination host:port reachable from the SSH server side
 ```
 
-Tức là phải có **SSH server đứng giữa**. Destination không được app local connect trực tiếp, mà được mở từ phía remote qua SSH tunnel.
-
-Repo này đã được chỉnh lại theo mô hình đó.
+Tức là luôn có **SSH server đứng giữa**. Destination được reach từ phía remote qua SSH tunnel, còn control plane trên host chỉ quản lý config, lifecycle và monitoring.
 
 ---
 
-## 2. Mục tiêu MVP đúng
+## 2. Mục tiêu MVP
 
 Xây dựng một hệ thống gồm:
 
 * **Web admin** để quản trị các SSH tunnel endpoint.
-* **Tunnel daemon** để bind local port cho từng endpoint.
-* Mỗi endpoint giữ **một SSH local-forward tunnel** đi qua SSH server rồi tới destination.
+* **Control plane trên host** để quản lý config, auth, metrics và lifecycle Docker.
+* **Một container tunnel riêng cho mỗi endpoint**.
+* Mỗi endpoint giữ **một local listener bên trong container** và forward qua SSH server tới destination.
 * **Realtime monitoring** để theo dõi:
   * endpoint nào đang running,
   * bao nhiêu client đang connect vào từng endpoint,
@@ -48,7 +41,7 @@ Mục tiêu UX:
 
 * tạo / sửa / xoá tunnel nhanh,
 * start / stop từng endpoint,
-* nhìn thấy local listen port forward đi đâu,
+* nhìn thấy container listen address forward đi đâu,
 * biết đang đi qua SSH server nào,
 * xem session đang hoạt động,
 * xem chart realtime.
@@ -63,8 +56,8 @@ Mục tiêu UX:
 * CRUD endpoint.
 * Mỗi endpoint là một **SSH Local Forward**.
 * Mỗi endpoint có:
-  * local listen host,
-  * local listen port,
+  * listen host bind bên trong container,
+  * listen port bên trong container,
   * remote destination host,
   * remote destination port,
   * SSH server host,
@@ -79,8 +72,10 @@ Mục tiêu UX:
 * Nhiều client có thể cùng connect vào một endpoint.
 * Mỗi client tạo **session riêng**.
 * Mỗi client được tách biệt bằng **một SSH session riêng** tới SSH server.
+* Nhiều endpoint có thể dùng cùng `listen_port` vì mỗi endpoint có container IP riêng.
 * UI hiển thị:
   * danh sách endpoint,
+  * Docker NAT IP / container listen address,
   * SSH server của endpoint,
   * active sessions,
   * total traffic,
@@ -130,28 +125,30 @@ Sau khi lưu:
 * config được ghi vào SQLite,
 * hệ thống tự gán một Docker NAT IP trong dải `172.20.0.0/16`,
 * hệ thống tự sinh `endpoint.json` và `docker-compose.yml` tương ứng cho tunnel đó,
-* nếu `enabled=true` thì app chạy `docker compose up -d` để start container tunnel tương ứng,
-* tunnel SSH sẽ bind listen port bên trong container và expose ra host theo config admin,
+* nếu `enabled=true` thì app build shared runner image nếu chưa có, rồi chạy `docker compose up -d --no-build --force-recreate`,
+* tunnel SSH bind listen port **bên trong container**,
+* port **không publish ra host**; truy cập qua Docker NAT IP `172.20.x.x:listen_port`,
 * endpoint xuất hiện ngay trên dashboard.
 
 ### Use case 2: Client connect vào tunnel
 
 Ví dụ endpoint `ixia_tunnel_us`:
 
-* listen: `127.0.0.1:30001`
+* container listen: `172.20.0.2:30001`
+* container bind: `0.0.0.0:30001`
 * SSH server: `10.46.4.66:22` user `thanh2n`
 * destination: `10.255.205.8:1080`
 
 Local client connect vào:
 
-* `127.0.0.1:30001`
+* `172.20.0.2:30001`
 
 Runtime sẽ:
 
 1. accept client connection,
-2. local connection đó được OpenSSH local-forward process nhận,
+2. local connection đó được listener bên trong container nhận,
 3. OpenSSH mở channel qua SSH server tới `10.255.205.8:1080`,
-4. app poll session/counter từ socket table của hệ điều hành,
+4. worker trong container ghi `runtime.json` để control plane đọc session/counter,
 5. đẩy event realtime lên dashboard.
 
 ### Use case 3: Admin theo dõi realtime
@@ -161,6 +158,7 @@ Dashboard hiển thị:
 * endpoint nào đang running,
 * endpoint nào stopped / disabled,
 * endpoint nào đang đi qua SSH server nào,
+* container NAT IP của từng endpoint,
 * bao nhiêu session đang mở,
 * top endpoint theo traffic,
 * chart active connections theo thời gian,
@@ -169,7 +167,7 @@ Dashboard hiển thị:
 
 ---
 
-## 5. Kiến trúc đúng
+## 5. Kiến trúc
 
 ### 5.1 Control plane
 
@@ -178,13 +176,16 @@ Dashboard hiển thị:
 * Auth admin
 * Config store SQLite
 * SSE realtime event stream
+* Docker config generator
+* Docker lifecycle manager
 
 ### 5.2 Data plane
 
-* Local listener manager
-* Session tracker
-* Endpoint-level SSH local-forward process manager
-* Metrics collector
+* 1 container riêng cho mỗi endpoint
+* Local listener bên trong container
+* Session tracker trong worker
+* Per-client `ssh -W` subprocess
+* Runtime state mirror (`runtime.json`)
 
 ### 5.3 Topology logic
 
@@ -198,16 +199,15 @@ Dashboard hiển thị:
 [SQLite Config Store] <----> [SSE Realtime Events]
       |
       v
-[Tunnel Daemon]
-   |- local listener endpoint A
-   |- local listener endpoint B
-   |- session tracker
-   |- ssh tunnel process manager
-   |- metrics collector
+[DockerTunnelManager]
+   |- endpoint container A (172.20.0.2)
+   |- endpoint container B (172.20.0.3)
+   |- docker compose lifecycle
+   |- runtime state reader
 
 Client flow:
 
-[Local App] -> [Local Listen Port] -> [SSH Server] -> [Destination Host:Port]
+[Local App / Host] -> [172.20.x.x:listen_port] -> [SSH Server] -> [Destination Host:Port]
 ```
 
 ---
@@ -218,7 +218,9 @@ Client flow:
 
 Mỗi endpoint có:
 
-* 1 local listening socket
+* 1 Docker container riêng
+* 1 Docker NAT IP cố định
+* 1 local listening socket bên trong container
 * config destination
 * config SSH server
 * nhiều active sessions
@@ -237,7 +239,7 @@ Mỗi client session có:
 
 Để đảm bảo isolation rõ ràng giữa nhiều client cùng vào một endpoint, runtime dùng:
 
-* app tự accept local client connection
+* worker trong container tự accept local client connection
 * với mỗi client, spawn:
   * `ssh -W destination_host:destination_port user@ssh_host`
 
@@ -283,6 +285,12 @@ tags
 status_message
 created_at
 updated_at
+docker_nat_ip
+docker_network_name
+docker_service_name
+docker_container_name
+docker_compose_path
+docker_endpoint_config_path
 ```
 
 ### 7.2 Bảng sessions
@@ -377,9 +385,10 @@ SSE events:
 * Endpoint table:
   * Name
   * Type
-  * Listen
+  * Container Listen
   * SSH server
   * Forward to
+  * Container IP
   * Status
   * Clients
   * Traffic
@@ -392,10 +401,10 @@ SSE events:
 Field chính:
 
 * Tunnel Name
-* Listen Host
-* Listen Port
+* Listen Host (bind trong container)
+* Listen Port (`1..65535`)
 * Destination Host
-* Destination Port
+* Destination Port (`1..65535`)
 * SSH Server Host
 * SSH Port
 * SSH Username
@@ -418,13 +427,17 @@ Repo hiện tại implement theo hướng:
 * **Backend/UI:** Python stdlib HTTP server + HTML/CSS/JS
 * **DB:** SQLite
 * **Realtime:** SSE
+* **Runtime:** Docker per-endpoint worker container
 * **SSH transport:** OpenSSH client binary `ssh`
 
 Điểm quan trọng:
 
-* không còn direct TCP connect từ app tới destination nữa,
+* control plane trên host không mở direct TCP connection tới destination,
+* host app không bind listen port cho tunnel,
+* tunnel chỉ listen bên trong container và được truy cập qua Docker NAT IP,
 * destination chỉ được reach từ phía SSH server,
-* mỗi client session dùng `ssh -W destination_host:destination_port ...`.
+* mỗi client session dùng `ssh -W destination_host:destination_port ...`,
+* runner image được dùng chung giữa các endpoint và chỉ build khi image chưa tồn tại.
 
 ---
 
@@ -438,7 +451,8 @@ Hiện tại:
 * chưa có password prompt tương tác kiểu desktop app,
 * mỗi client session là một SSH process riêng,
 * preflight SSH được chạy khi start endpoint,
-* nếu endpoint direct-forward cũ còn trong DB thì sẽ bị xem là legacy và không start được.
+* process web admin cần quyền truy cập Docker daemon,
+* lần build runner image đầu tiên có thể cần `docker login` hoặc `APP_DOCKER_RUNNER_IMAGE` trỏ tới image đã prebuild.
 
 ---
 
@@ -446,9 +460,11 @@ Hiện tại:
 
 ### File chính
 
-* `tunnel_admin/`: app backend + UI + tunnel engine
+* `tunnel_admin/`: app backend + UI + control plane + worker runtime
 * `data/`: SQLite DB + secret
+* `data/docker/`: per-endpoint Docker artifacts + runtime state
 * `runtime/`: PID + logs
+* `Dockerfile.tunnel-runner`
 * `start.sh`
 * `stop.sh`
 
@@ -464,8 +480,19 @@ Biến quan trọng:
 
 * `APP_HOST`
 * `APP_PORT`
+* `APP_DATA_DIR`
+* `APP_RUNTIME_DIR`
 * `ADMIN_DEFAULT_USER`
 * `ADMIN_DEFAULT_PASS`
+* `APP_DOCKER_NETWORK_NAME`
+* `APP_DOCKER_NETWORK_SUBNET`
+* `APP_DOCKER_RUNNER_IMAGE`
+
+### Yêu cầu môi trường
+
+* `python3`
+* Docker daemon + Docker CLI
+* process chạy app phải truy cập được Docker socket
 
 ### Start
 
@@ -477,6 +504,22 @@ Biến quan trọng:
 
 ```bash
 ./stop.sh
+```
+
+### Ghi chú deploy
+
+* `start.sh` chỉ start web admin process, không force restart process cũ nếu PID file vẫn hợp lệ.
+* Tunnel container được start/stop từ UI hoặc API.
+* Nếu lần start đầu tiên bị Docker Hub rate limit, dùng:
+
+```bash
+docker login
+```
+
+hoặc prebuild image rồi set:
+
+```bash
+export APP_DOCKER_RUNNER_IMAGE=your-registry/tunnel-forwarding-runner:tag
 ```
 
 ### Web URL

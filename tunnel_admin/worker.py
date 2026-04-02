@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import signal
+import shutil
 import sys
 import threading
 from typing import Any
@@ -14,6 +15,11 @@ from .tunnel import TunnelEngine
 
 
 LOGGER = logging.getLogger("tunnel_admin.worker")
+
+SSH_HOME_MOUNT = Path("/run/tunnel-secrets/ssh-home")
+SSH_RUNTIME_DIR = Path("/root/.ssh")
+SSH_RUNTIME_PRIVATE_KEY = SSH_RUNTIME_DIR / "tunnel_identity"
+SSH_RUNTIME_KNOWN_HOSTS = SSH_RUNTIME_DIR / "known_hosts"
 
 
 def utc_now_iso() -> str:
@@ -178,6 +184,82 @@ def load_runtime_config(config_path: Path) -> tuple[dict[str, Any], float]:
     return payload, connect_timeout_seconds
 
 
+def _chmod_if_exists(path: Path, mode: int) -> None:
+    try:
+        path.chmod(mode)
+    except FileNotFoundError:
+        return
+
+
+def _reset_runtime_ssh_dir(target_dir: Path) -> None:
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir.chmod(0o700)
+
+
+def _copy_tree_with_secure_permissions(source_dir: Path, target_dir: Path) -> None:
+    for source_path in sorted(source_dir.rglob("*")):
+        relative_path = source_path.relative_to(source_dir)
+        target_path = target_dir / relative_path
+
+        if source_path.is_dir():
+            target_path.mkdir(parents=True, exist_ok=True)
+            target_path.chmod(0o700)
+            continue
+
+        if not source_path.is_file():
+            continue
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, target_path)
+        target_path.chmod(0o600)
+
+
+def _stage_runtime_ssh_material(endpoint: dict[str, Any]) -> dict[str, Any]:
+    staged_endpoint = dict(endpoint)
+    _reset_runtime_ssh_dir(SSH_RUNTIME_DIR)
+
+    if SSH_HOME_MOUNT.exists() and SSH_HOME_MOUNT.is_dir():
+        _copy_tree_with_secure_permissions(SSH_HOME_MOUNT, SSH_RUNTIME_DIR)
+
+    explicit_key = str(endpoint.get("ssh_private_key_path") or "").strip()
+    if explicit_key:
+        source_key = Path(explicit_key).expanduser().resolve()
+        SSH_RUNTIME_PRIVATE_KEY.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_key, SSH_RUNTIME_PRIVATE_KEY)
+        SSH_RUNTIME_PRIVATE_KEY.chmod(0o600)
+        staged_endpoint["ssh_private_key_path"] = str(SSH_RUNTIME_PRIVATE_KEY)
+
+    explicit_known_hosts = str(endpoint.get("ssh_known_hosts_path") or "").strip()
+    if explicit_known_hosts:
+        source_known_hosts = Path(explicit_known_hosts).expanduser().resolve()
+        SSH_RUNTIME_KNOWN_HOSTS.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_known_hosts, SSH_RUNTIME_KNOWN_HOSTS)
+        SSH_RUNTIME_KNOWN_HOSTS.chmod(0o600)
+        staged_endpoint["ssh_known_hosts_path"] = str(SSH_RUNTIME_KNOWN_HOSTS)
+
+    _chmod_if_exists(SSH_RUNTIME_DIR / "config", 0o600)
+    _chmod_if_exists(SSH_RUNTIME_DIR / "known_hosts", 0o600)
+    _chmod_if_exists(SSH_RUNTIME_DIR / "authorized_keys", 0o600)
+
+    for candidate in SSH_RUNTIME_DIR.iterdir():
+        if candidate.is_dir():
+            candidate.chmod(0o700)
+            continue
+        if not candidate.is_file():
+            continue
+        if candidate.suffix == ".pub":
+            candidate.chmod(0o644)
+            continue
+        if candidate.name in {"known_hosts", "known_hosts.old"}:
+            candidate.chmod(0o600)
+            continue
+        candidate.chmod(0o600)
+
+    return staged_endpoint
+
+
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
     if len(args) != 1:
@@ -187,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     config_path = Path(args[0]).expanduser().resolve()
     endpoint, connect_timeout_seconds = load_runtime_config(config_path)
+    endpoint = _stage_runtime_ssh_material(endpoint)
     state_file = Path(
         os.getenv("TUNNEL_RUNTIME_STATE_FILE") or str(config_path.with_name("runtime.json"))
     ).expanduser().resolve()

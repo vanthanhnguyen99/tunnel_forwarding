@@ -109,7 +109,7 @@ class DockerConfigManager:
             bind_mounts.append(
                 {
                     "source": str(ssh_dir.resolve()),
-                    "target": "/root/.ssh",
+                    "target": "/run/tunnel-secrets/ssh-home",
                     "read_only": True,
                 }
             )
