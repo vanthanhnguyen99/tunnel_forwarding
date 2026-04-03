@@ -41,6 +41,7 @@ class DockerTunnelManager:
         iptables_source_subnet: str,
         iptables_input_interface: str,
         iptables_output_interface: str,
+        iptables_use_sudo: bool,
     ) -> None:
         self.database = database
         self.status_callback = status_callback
@@ -51,6 +52,7 @@ class DockerTunnelManager:
         self.iptables_source_subnet = iptables_source_subnet
         self.iptables_input_interface = iptables_input_interface
         self.iptables_output_interface = iptables_output_interface
+        self.iptables_use_sudo = iptables_use_sudo
 
     def shutdown(self) -> None:
         return None
@@ -370,12 +372,17 @@ class DockerTunnelManager:
             return True, None
         if shutil.which("iptables") is None:
             return False, "iptables CLI is not available on this host"
+        if self.iptables_use_sudo and shutil.which("sudo") is None:
+            return False, "sudo CLI is not available on this host"
+
+        prefix = ["sudo", "-n"] if self.iptables_use_sudo else []
 
         commands = [
-            ["iptables", "-w", "-F"],
-            ["iptables", "-w", "-t", "nat", "-F"],
-            ["iptables", "-w", "-A", "FORWARD", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+            [*prefix, "iptables", "-w", "-F"],
+            [*prefix, "iptables", "-w", "-t", "nat", "-F"],
+            [*prefix, "iptables", "-w", "-A", "FORWARD", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
             [
+                *prefix,
                 "iptables",
                 "-w",
                 "-A",
@@ -391,8 +398,9 @@ class DockerTunnelManager:
                 "-j",
                 "ACCEPT",
             ],
-            ["iptables", "-w", "-A", "FORWARD", "-i", self.iptables_input_interface, "-j", "DROP"],
+            [*prefix, "iptables", "-w", "-A", "FORWARD", "-i", self.iptables_input_interface, "-j", "DROP"],
             [
+                *prefix,
                 "iptables",
                 "-w",
                 "-t",
@@ -420,6 +428,17 @@ class DockerTunnelManager:
             if result.returncode == 0:
                 continue
             message = _decode_text(result.stderr) or _decode_text(result.stdout) or "iptables command failed"
+            if "permission denied" in message.lower():
+                if self.iptables_use_sudo:
+                    message = (
+                        f"{message}. Configure passwordless sudo for iptables, "
+                        "or run the admin process as root."
+                    )
+                else:
+                    message = (
+                        f"{message}. Run the admin process as root, or set "
+                        "`APP_IPTABLES_USE_SUDO=1` and allow passwordless sudo for iptables."
+                    )
             return False, f"Failed to apply iptables rule `{ ' '.join(command) }`: {message}"
         return True, None
 

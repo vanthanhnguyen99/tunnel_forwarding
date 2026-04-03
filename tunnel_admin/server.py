@@ -146,6 +146,7 @@ class AppContext:
             iptables_source_subnet=settings.iptables_source_subnet,
             iptables_input_interface=settings.iptables_input_interface,
             iptables_output_interface=settings.iptables_output_interface,
+            iptables_use_sudo=settings.iptables_use_sudo,
         )
         self._stop_event = threading.Event()
         self._metrics_thread = threading.Thread(target=self._metrics_loop, daemon=True)

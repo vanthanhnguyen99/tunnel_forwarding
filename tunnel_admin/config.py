@@ -77,6 +77,7 @@ class Settings:
     iptables_source_subnet: str
     iptables_input_interface: str
     iptables_output_interface: str
+    iptables_use_sudo: bool
 
     @classmethod
     def load(cls) -> "Settings":
@@ -115,4 +116,5 @@ class Settings:
             iptables_source_subnet=os.getenv("APP_IPTABLES_SOURCE_SUBNET", "172.31.250.0/24"),
             iptables_input_interface=os.getenv("APP_IPTABLES_INPUT_INTERFACE", "tun0"),
             iptables_output_interface=os.getenv("APP_IPTABLES_OUTPUT_INTERFACE", "eth1"),
+            iptables_use_sudo=_env_bool("APP_IPTABLES_USE_SUDO", False),
         )
