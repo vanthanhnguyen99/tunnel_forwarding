@@ -73,6 +73,7 @@ class Settings:
     docker_network_name: str
     docker_network_subnet: str
     docker_runner_image: str
+    docker_use_sudo: bool
     apply_iptables_on_endpoint_start: bool
     iptables_source_subnet: str
     iptables_input_interface: str
@@ -112,6 +113,7 @@ class Settings:
             docker_network_name=os.getenv("APP_DOCKER_NETWORK_NAME", "tunnel_nat"),
             docker_network_subnet=os.getenv("APP_DOCKER_NETWORK_SUBNET", "172.20.0.0/16"),
             docker_runner_image=os.getenv("APP_DOCKER_RUNNER_IMAGE", _default_docker_runner_image()),
+            docker_use_sudo=_env_bool("APP_DOCKER_USE_SUDO", False),
             apply_iptables_on_endpoint_start=_env_bool("APP_APPLY_IPTABLES_ON_ENDPOINT_START", True),
             iptables_source_subnet=os.getenv("APP_IPTABLES_SOURCE_SUBNET", "172.31.250.0/24"),
             iptables_input_interface=os.getenv("APP_IPTABLES_INPUT_INTERFACE", "tun0"),

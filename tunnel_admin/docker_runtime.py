@@ -15,6 +15,8 @@ from .config import ROOT_DIR
 LOGGER = logging.getLogger("tunnel_admin.docker_runtime")
 
 SESSION_ID_FACTOR = 1_000_000
+STARTUP_READY_TIMEOUT_SECONDS = 20.0
+STARTUP_POLL_INTERVAL_SECONDS = 0.25
 
 
 def _utc_now_iso() -> str:
@@ -37,6 +39,7 @@ class DockerTunnelManager:
         docker_network_name: str,
         docker_network_subnet: str,
         docker_runner_image: str,
+        docker_use_sudo: bool,
         apply_iptables_on_endpoint_start: bool,
         iptables_source_subnet: str,
         iptables_input_interface: str,
@@ -48,6 +51,7 @@ class DockerTunnelManager:
         self.docker_network_name = docker_network_name
         self.docker_network_subnet = docker_network_subnet
         self.docker_runner_image = docker_runner_image
+        self.docker_use_sudo = docker_use_sudo
         self.apply_iptables_on_endpoint_start = apply_iptables_on_endpoint_start
         self.iptables_source_subnet = iptables_source_subnet
         self.iptables_input_interface = iptables_input_interface
@@ -61,6 +65,10 @@ class DockerTunnelManager:
         endpoint_id = int(endpoint["id"])
         if shutil.which("docker") is None:
             message = "Docker CLI is not available on this host"
+            self.status_callback(endpoint_id, message)
+            return False, message
+        if self.docker_use_sudo and shutil.which("sudo") is None:
+            message = "sudo CLI is not available on this host"
             self.status_callback(endpoint_id, message)
             return False, message
 
@@ -83,13 +91,15 @@ class DockerTunnelManager:
         result = self._run_compose(endpoint, "up", "-d", "--no-build", "--force-recreate", "--remove-orphans")
         if result.returncode != 0:
             message = _decode_text(result.stderr) or _decode_text(result.stdout) or "docker compose up failed"
+            message = self._augment_permission_message(message, tool="docker")
             self.status_callback(endpoint_id, message)
             return False, message
 
-        if not self.is_endpoint_running(endpoint_id):
-            message = "Container did not reach running state after docker compose up"
-            self.status_callback(endpoint_id, message)
-            return False, message
+        ready, ready_message = self._wait_for_endpoint_ready(endpoint)
+        if not ready:
+            self._run_compose(endpoint, "down", "--remove-orphans", "--timeout", "2")
+            self.status_callback(endpoint_id, ready_message)
+            return False, ready_message
 
         iptables_ready, iptables_message = self._apply_iptables_rules()
         if not iptables_ready:
@@ -118,6 +128,7 @@ class DockerTunnelManager:
         result = self._run_compose(endpoint, "down", "--remove-orphans", "--timeout", "2")
         if result.returncode != 0 and not silence_missing:
             message = _decode_text(result.stderr) or _decode_text(result.stdout) or "docker compose down failed"
+            message = self._augment_permission_message(message, tool="docker")
             self.status_callback(endpoint_id, message)
             return False
 
@@ -262,11 +273,46 @@ class DockerTunnelManager:
             return "running"
         return "stopped"
 
+    def _wait_for_endpoint_ready(self, endpoint: dict[str, Any]) -> tuple[bool, str | None]:
+        deadline = time.monotonic() + STARTUP_READY_TIMEOUT_SECONDS
+        last_phase = ""
+        last_status_message = ""
+
+        while time.monotonic() < deadline:
+            compose_state = self._read_compose_state(endpoint)
+            runtime_state = self._read_runtime_state(endpoint)
+            phase = str(runtime_state.get("phase") or "").strip().lower()
+            status_message = str(runtime_state.get("status_message") or "").strip()
+
+            if phase:
+                last_phase = phase
+            if status_message:
+                last_status_message = status_message
+
+            if phase == "running":
+                return True, None
+            if phase == "error":
+                return False, status_message or "Endpoint worker failed during startup"
+            if compose_state == "stopped":
+                if status_message:
+                    return False, status_message
+                if phase and phase != "running":
+                    return False, f"Endpoint worker stopped during startup with phase={phase}"
+                return False, "Container exited before endpoint runtime became ready"
+
+            time.sleep(STARTUP_POLL_INTERVAL_SECONDS)
+
+        if last_status_message:
+            return False, last_status_message
+        if last_phase and last_phase != "running":
+            return False, f"Timed out waiting for endpoint runtime readiness; last phase={last_phase}"
+        return False, "Timed out waiting for endpoint runtime readiness"
+
     def _run_compose(self, endpoint: dict[str, Any], *args: str) -> subprocess.CompletedProcess[str]:
         compose_path = self._compose_path(endpoint)
         if compose_path is None:
             return subprocess.CompletedProcess(args=["docker", "compose"], returncode=1, stdout="", stderr="compose path missing")
-        command = ["docker", "compose", "-f", str(compose_path), *args]
+        command = [*self._docker_prefix(), "docker", "compose", "-f", str(compose_path), *args]
         return subprocess.run(
             command,
             stdout=subprocess.PIPE,
@@ -277,7 +323,7 @@ class DockerTunnelManager:
 
     def _ensure_network_exists(self) -> tuple[bool, str | None]:
         inspect = subprocess.run(
-            ["docker", "network", "inspect", self.docker_network_name],
+            [*self._docker_prefix(), "docker", "network", "inspect", self.docker_network_name],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -302,6 +348,7 @@ class DockerTunnelManager:
 
         create = subprocess.run(
             [
+                *self._docker_prefix(),
                 "docker",
                 "network",
                 "create",
@@ -318,12 +365,13 @@ class DockerTunnelManager:
         )
         if create.returncode != 0:
             message = _decode_text(create.stderr) or _decode_text(create.stdout) or "Failed to create Docker network"
+            message = self._augment_permission_message(message, tool="docker")
             return False, message
         return True, None
 
     def _ensure_runner_image(self) -> tuple[bool, str | None]:
         inspect = subprocess.run(
-            ["docker", "image", "inspect", self.docker_runner_image],
+            [*self._docker_prefix(), "docker", "image", "inspect", self.docker_runner_image],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -334,6 +382,7 @@ class DockerTunnelManager:
 
         build = subprocess.run(
             [
+                *self._docker_prefix(),
                 "docker",
                 "build",
                 "-t",
@@ -353,6 +402,7 @@ class DockerTunnelManager:
                 or _decode_text(build.stdout)
                 or f"Failed to build Docker runner image {self.docker_runner_image}"
             )
+            message = self._augment_permission_message(message, tool="docker")
             return False, self._format_runner_image_error(message)
         return True, None
 
@@ -366,6 +416,33 @@ class DockerTunnelManager:
                 "`APP_DOCKER_RUNNER_IMAGE` at that tag."
             )
         return message
+
+    def _docker_prefix(self) -> list[str]:
+        return ["sudo", "-n"] if self.docker_use_sudo else []
+
+    def _augment_permission_message(self, message: str, *, tool: str) -> str:
+        normalized = message.lower()
+        if "permission denied" not in normalized and "must be root" not in normalized:
+            return message
+        if tool == "docker":
+            if self.docker_use_sudo:
+                return (
+                    f"{message}. Configure passwordless sudo for docker, "
+                    "or run the admin process as root."
+                )
+            return (
+                f"{message}. Run the admin process as root, add the service user to the docker group, "
+                "or set `APP_DOCKER_USE_SUDO=1` and allow passwordless sudo for docker."
+            )
+        if self.iptables_use_sudo:
+            return (
+                f"{message}. Configure passwordless sudo for iptables, "
+                "or run the admin process as root."
+            )
+        return (
+            f"{message}. Run the admin process as root, or set "
+            "`APP_IPTABLES_USE_SUDO=1` and allow passwordless sudo for iptables."
+        )
 
     def _apply_iptables_rules(self) -> tuple[bool, str | None]:
         if not self.apply_iptables_on_endpoint_start:
@@ -428,17 +505,7 @@ class DockerTunnelManager:
             if result.returncode == 0:
                 continue
             message = _decode_text(result.stderr) or _decode_text(result.stdout) or "iptables command failed"
-            if "permission denied" in message.lower():
-                if self.iptables_use_sudo:
-                    message = (
-                        f"{message}. Configure passwordless sudo for iptables, "
-                        "or run the admin process as root."
-                    )
-                else:
-                    message = (
-                        f"{message}. Run the admin process as root, or set "
-                        "`APP_IPTABLES_USE_SUDO=1` and allow passwordless sudo for iptables."
-                    )
+            message = self._augment_permission_message(message, tool="iptables")
             return False, f"Failed to apply iptables rule `{ ' '.join(command) }`: {message}"
         return True, None
 

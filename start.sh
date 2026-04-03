@@ -12,20 +12,59 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
 fi
 
 RUNTIME_DIR="${APP_RUNTIME_DIR:-$ROOT_DIR/runtime}"
+DATA_DIR="${APP_DATA_DIR:-$ROOT_DIR/data}"
+DOCKER_STATE_DIR="${APP_DOCKER_CONFIG_DIR:-$DATA_DIR/docker}"
 PID_FILE="$RUNTIME_DIR/tunnel_forwarding.pid"
 LOG_FILE="$RUNTIME_DIR/service.log"
+APP_LOG_FILE="$RUNTIME_DIR/app.log"
 
-mkdir -p "$RUNTIME_DIR" "$ROOT_DIR/data"
+mkdir -p "$RUNTIME_DIR" "$DATA_DIR"
 
-if [[ -f "$PID_FILE" ]]; then
-  EXISTING_PID="$(cat "$PID_FILE")"
-  if [[ -n "$EXISTING_PID" ]] && kill -0 "$EXISTING_PID" 2>/dev/null; then
-    echo "Service is already running with PID $EXISTING_PID"
-    echo "Log file: $LOG_FILE"
-    exit 0
+stop_existing_service() {
+  if [[ ! -f "$PID_FILE" ]]; then
+    return 0
   fi
+
+  EXISTING_PID="$(cat "$PID_FILE")"
+  if [[ -z "$EXISTING_PID" ]]; then
+    rm -f "$PID_FILE"
+    return 0
+  fi
+
+  if ! kill -0 "$EXISTING_PID" 2>/dev/null; then
+    rm -f "$PID_FILE"
+    return 0
+  fi
+
+  echo "Stopping existing tunnel admin process: $EXISTING_PID"
+  kill "$EXISTING_PID"
+
+  for _ in {1..20}; do
+    if ! kill -0 "$EXISTING_PID" 2>/dev/null; then
+      rm -f "$PID_FILE"
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  echo "Process $EXISTING_PID did not stop gracefully. Sending SIGKILL."
+  kill -9 "$EXISTING_PID"
   rm -f "$PID_FILE"
-fi
+}
+
+clean_previous_runtime() {
+  rm -f "$PID_FILE" "$LOG_FILE" "$APP_LOG_FILE"
+
+  if [[ -d "$DOCKER_STATE_DIR" ]]; then
+    find "$DOCKER_STATE_DIR" -type f \( -name 'runtime.json' -o -name '*.tmp' \) -delete
+    find "$DOCKER_STATE_DIR" -type f -path '*/commands/*.json' -delete
+  fi
+
+  find "$ROOT_DIR" -type d -name '__pycache__' -prune -exec rm -rf {} +
+}
+
+stop_existing_service
+clean_previous_runtime
 
 if command -v setsid >/dev/null 2>&1; then
   setsid python3 -m tunnel_admin >>"$LOG_FILE" 2>&1 < /dev/null &

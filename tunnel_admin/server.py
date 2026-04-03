@@ -142,6 +142,7 @@ class AppContext:
             docker_network_name=settings.docker_network_name,
             docker_network_subnet=settings.docker_network_subnet,
             docker_runner_image=settings.docker_runner_image,
+            docker_use_sudo=settings.docker_use_sudo,
             apply_iptables_on_endpoint_start=settings.apply_iptables_on_endpoint_start,
             iptables_source_subnet=settings.iptables_source_subnet,
             iptables_input_interface=settings.iptables_input_interface,
